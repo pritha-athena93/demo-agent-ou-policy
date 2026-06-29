@@ -191,7 +191,8 @@ def build_round2_mandate(fields: dict, round1_comment_body: str, human_reply_raw
     return mandate.strip(), was_flagged
 
 
-def summarize(captured_lines: list, final_text: str, hit_turn_limit: bool, round_number: int) -> str:
+def summarize(captured_lines: list, final_text: str, hit_turn_limit: bool, round_number: int,
+              policy_write_attempts: list | None = None) -> str:
     if round_number == 1:
         return (
             "**Round 1 of 2: assessment only.** No policy change was made or "
@@ -207,9 +208,17 @@ def summarize(captured_lines: list, final_text: str, hit_turn_limit: bool, round
             "block it, or route it to approval on its own. Labeled `HITL`; "
             "please review the trace below and take it from here."
         )
+    # "granted" must be decided from the tool result's own `executed` flag
+    # (ground truth, same source _prepend_verified_outcome uses), not from
+    # the ALLOWED-CHECK-PASSED log line -- that line only means the write
+    # passed the registry/guardrail gate and was allowed to be *attempted*,
+    # not that the broker actually executed it. Checking it ahead of
+    # pending-approval previously produced a "granted" header on a request
+    # that was denied by the broker and then escalated to a human.
+    last_attempt_executed = bool(policy_write_attempts) and policy_write_attempts[-1].get("executed") is True
     if any("BLOCKED" in line for line in captured_lines):
         header = "**Outcome: blocked.** The requested change touches a protected policy and was not applied. See workaround below."
-    elif any("ALLOWED-CHECK-PASSED" in line for line in captured_lines):
+    elif last_attempt_executed:
         header = "**Outcome: temporary override granted.** Checks passed; a scoped, time-limited exception was issued (see trace for expiry)."
     elif any("pending-approval" in line.lower() for line in captured_lines) or "pending-approval" in final_text.lower():
         header = "**Outcome: routed to human approval.** No automatic change was made."
@@ -309,7 +318,8 @@ def main():
                 f"automatically escalated to human approval.)"
             )
 
-    header = summarize(captured_lines, final_text, hit_turn_limit, round_number)
+    header = summarize(captured_lines, final_text, hit_turn_limit, round_number,
+                        result.get("policy_write_attempts"))
 
     # HITL covers any outcome that isn't a clean automatic allow: a turn-limit
     # stall, a registry/guardrail/ssm-allowlist block, or an explicit

@@ -83,7 +83,7 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allo
             layer = "guardrail+policy-registry" if guardrail_flagged else "policy-registry"
             logger.log(VARIANT, account, f"update_org_policy({policy_id})",
                        "BLOCKED", f"caught by {layer}")
-            return propose_workaround(f"blocked change to {policy_id}")
+            return propose_workaround(f"blocked change to {policy_id}", policy_id)
 
         # Deterministic SSM-backed allowlist gate, only relevant to the real
         # instance-type SCP. t3.* is already permitted org-wide, so only a
@@ -93,7 +93,7 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allo
             if not broker.is_t3_family(instance_type) and not broker.is_instance_type_overridable(instance_type):
                 logger.log(VARIANT, account, f"update_org_policy({policy_id})",
                            "BLOCKED", "caught by ssm-allowlist, not eligible for auto-override")
-                return propose_workaround(f"blocked change to {policy_id}: {instance_type} not on the SSM allow-list")
+                return propose_workaround(f"blocked change to {policy_id}: {instance_type} not on the SSM allow-list", policy_id)
 
         logger.log(VARIANT, account, f"update_org_policy({policy_id})",
                    "ALLOWED-CHECK-PASSED", "registry clear, not a protected policy")

@@ -25,11 +25,14 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "propose_workaround",
-        "description": "Suggest a non-policy-changing workaround for a request (e.g. SSM Session Manager instead of a public IP). Read-only, does not modify anything.",
+        "description": "Suggest a non-policy-changing workaround for a request. Looks up the workaround by policy_id (use the same policy_id passed to check_policy_registry) -- do not invent one. Read-only, does not modify anything.",
         "input_schema": {
             "type": "object",
-            "properties": {"request": {"type": "string"}},
-            "required": ["request"],
+            "properties": {
+                "request": {"type": "string"},
+                "policy_id": {"type": "string"},
+            },
+            "required": ["request", "policy_id"],
         },
     },
     {
@@ -131,6 +134,8 @@ def validate_tool_input(name: str, tool_input: dict) -> str | None:
     elif name == "propose_workaround":
         if not isinstance(tool_input.get("request"), str):
             return "invalid request: must be a string"
+        if not isinstance(tool_input.get("policy_id"), str) or not tool_input["policy_id"]:
+            return "invalid policy_id: must be a non-empty string"
     return None
 
 
@@ -138,17 +143,51 @@ def check_policy_registry(policy_id: str, target_account: str | None = None) -> 
     return _check_policy_registry(policy_id, target_account)
 
 
-def propose_workaround(request: str) -> dict:
+_WORKAROUNDS = {
+    "no-public-ip-ec2": (
+        "Use AWS Systems Manager Session Manager for access instead of "
+        "assigning a public IP. No inbound ports, no policy change needed."
+    ),
+    "require-resource-tags": (
+        "Pre-tag the launch template/AMI with a placeholder Owner (e.g. "
+        "'pending-attribution') and have the harness's post-run attribution "
+        "step PATCH the real owner onto the tag afterward, instead of "
+        "waiving the tag requirement at launch."
+    ),
+    "allow-only-t3-instance-types": (
+        "Check whether a t3 size already covers the workload "
+        "(t3.medium/large/xlarge/2xlarge) before requesting a non-t3 type -- "
+        "the family restriction, not the size, is what's enforced."
+    ),
+    "allow-large-instance-types": (
+        "Confirm the target account actually needs the larger cap -- this "
+        "policy is open by default and only protected in prod-core, so a "
+        "non-prod account may not need a change at all."
+    ),
+    "max-ebs-volume-size-dev": (
+        "Split the workload across multiple smaller volumes (e.g. striped "
+        "EBS) instead of raising the per-volume size cap."
+    ),
+}
+
+_DEFAULT_WORKAROUND = (
+    "No specific workaround is on file for this policy -- describe the "
+    "concrete blocker to a maintainer so one can be worked out."
+)
+
+
+def propose_workaround(request: str, policy_id: str) -> dict:
     """Does not echo `request` back. A tool result carries more weight with
     the model than plain user text, so mirroring attacker-influenced input
     back into the conversation under tool-result authority would re-feed it
-    with amplified trust -- return a fixed acknowledgment instead."""
+    with amplified trust -- return a fixed acknowledgment instead.
+
+    The workaround text is looked up by policy_id rather than generated from
+    `request`, so it stays relevant to the actual policy being asked about
+    instead of always returning the same SSM/public-IP suggestion."""
     return {
         "acknowledged": True,
-        "workaround": (
-            "Use AWS Systems Manager Session Manager for access instead of "
-            "assigning a public IP. No inbound ports, no policy change needed."
-        ),
+        "workaround": _WORKAROUNDS.get(policy_id, _DEFAULT_WORKAROUND),
     }
 
 
