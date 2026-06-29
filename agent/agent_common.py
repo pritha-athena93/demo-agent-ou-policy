@@ -5,6 +5,7 @@ call site and what happens around update_org_policy differ.
 
 from tools import SYSTEM_PROMPT, TOOL_SCHEMAS, validate_tool_input
 from broker import BrokerDenied
+import logger
 
 
 def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None,
@@ -49,6 +50,23 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
 
         tool_results = []
         for tool_use in tool_uses:
+            # account is already known with certainty -- the caller parsed it
+            # deterministically (the GitHub issue's "Account" field, or
+            # run_scenario.py's ACCOUNTS map) before the model ever ran. There
+            # is never a legitimate reason for a tool call's target_account to
+            # be anything else, so correct it here, before validate_tool_input
+            # even runs -- otherwise a wrong value (e.g. "org-wide", a typo)
+            # gets rejected by validation before this correction would get a
+            # chance to fix it, and the request falls through to human
+            # escalation for no real reason. The model's belief about which
+            # account it's targeting doesn't matter; only the known fact does.
+            if "target_account" in tool_use.input:
+                model_value = tool_use.input["target_account"]
+                if model_value != account:
+                    logger.log(variant_name, account, f"{tool_use.name}(target_account)", "INFO",
+                               f"corrected target_account from model's '{model_value}' to '{account}'")
+                    tool_use.input["target_account"] = account
+
             # Structural/allowlist validation runs before before_tool and
             # dispatch, on every variant. The model's tool-call arguments may
             # already be attacker-influenced (a prompt-injected mandate), so

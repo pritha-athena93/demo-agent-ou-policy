@@ -5,7 +5,15 @@ now, Claude later) needs no changes to the agent loop or tool schemas.
 """
 
 import json
+import os
 from types import SimpleNamespace
+
+# Optional, for cutting down phrasing/path variance on demo takes -- not a
+# substitute for the deterministic checks elsewhere in this repo, just turns
+# the dial down on which of several valid next steps the model picks. Unset
+# by default (uses the model's normal sampling); read fresh on every call
+# rather than cached at import time, so a test can flip it mid-process.
+_AGENT_TEMPERATURE_ENV = "AGENT_TEMPERATURE"
 
 
 def _anthropic_tools_to_converse(tool_schemas):
@@ -67,12 +75,17 @@ class _Messages:
         self._model_id = model_id
 
     def create(self, model, max_tokens, system, tools, messages):
+        inference_config = {"maxTokens": max_tokens}
+        temperature = os.environ.get(_AGENT_TEMPERATURE_ENV)
+        if temperature:
+            inference_config["temperature"] = float(temperature)
+
         resp = self._runtime.converse(
             modelId=model,
             messages=_messages_to_converse(messages),
             system=[{"text": system}],
             toolConfig=_anthropic_tools_to_converse(tools),
-            inferenceConfig={"maxTokens": max_tokens},
+            inferenceConfig=inference_config,
         )
         content = resp["output"]["message"]["content"]
         return SimpleNamespace(content=_converse_content_to_blocks(content), stop_reason=resp.get("stopReason"))

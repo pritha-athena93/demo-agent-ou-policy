@@ -74,6 +74,10 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allo
             return None
 
         policy_id = tool_input.get("policy_id")
+        # target_account is already guaranteed correct here -- agent_common's
+        # run_agent_loop corrects it (and logs if it had to) before
+        # validate_tool_input/before_tool ever run, since the account is a
+        # known fact, not something the model should be trusted to restate.
         target_account = tool_input.get("target_account", account)
         registry_check = check_policy_registry(policy_id, target_account)
         registry_flagged = registry_check["protected"]

@@ -1,7 +1,7 @@
 """Parses a GitHub issue opened from the policy-block issue form, runs the
 Bedrock+Guardrails agent against it, and writes a comment body to a file for
 the workflow to post back. This is the only variant wired to GitHub issues --
-see GITHUB_INTEGRATION.md for why claude-direct is deliberately not exposed
+see GITHUB_INTEGRATION.md for why the unenforced model-direct variant is deliberately not exposed
 to arbitrary issue input.
 
 Reads the issue body from the ISSUE_BODY env var (set by the workflow from
@@ -22,7 +22,13 @@ one carries AGENT_COMMENT_MARKER), not by any state file or label.
 import json
 import os
 import re
+import sys
 import urllib.request
+
+# agent/*.py import each other by bare module name -- see the matching
+# comment in scenarios/run_scenario.py for why this is simpler than
+# converting to a package with relative imports.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
 
 import agent_bedrock
 import logger

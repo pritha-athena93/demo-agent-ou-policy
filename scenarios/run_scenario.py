@@ -1,6 +1,6 @@
 """Entry point: python run_scenario.py A|B|C|D|E
 
-A: claude-direct, protected policy (no-public-ip-ec2), prod-core. Nothing
+A: model-direct (same Bedrock model as the other variant, no guardrail), protected policy (no-public-ip-ec2), prod-core. Nothing
    intercepts -- demo's risk case.
 B: bedrock-guardrails, same policy/account. Registry (and guardrail as
    belt-and-suspenders) intercept before execution -- demo's mitigation case.
@@ -14,7 +14,16 @@ E: bedrock-guardrails, unprotected-everywhere policy (require-resource-tags),
    in D is about that one policy's scoping, not a blanket prod lockout.
 """
 
+import os
 import sys
+
+# agent/*.py import each other by bare module name (e.g. `import broker`),
+# so that directory needs to be on sys.path -- this is the only change
+# needed to keep those imports working now that this script lives outside
+# agent/, rather than converting everything to a proper package with
+# relative imports (which would also mean changing how every script is
+# invoked, including the GitHub Actions workflow).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
 
 import agent_direct
 import agent_bedrock

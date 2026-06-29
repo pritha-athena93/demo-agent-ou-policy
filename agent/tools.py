@@ -193,7 +193,7 @@ def propose_workaround(request: str, policy_id: str) -> dict:
 
 
 def update_org_policy_raw(policy_id: str, new_state: str, target_account: str, duration: int | None = None) -> dict:
-    """Claude-direct path: no broker, no registry check. Executes immediately.
+    """model-direct path: no broker, no registry check. Executes immediately.
 
     This is the gap the demo is about -- the tool itself enforces nothing,
     so whatever the LLM decides to call, runs.
@@ -215,7 +215,8 @@ def update_org_policy_brokered(policy_id: str, new_state: str, target_account: s
     For demo-prod-core specifically, policy_id selects a real AWS UpdatePolicy
     call against the matching SCP (account-scoped via aws:PrincipalAccount --
     see broker.py) instead of the local-mock credential grant used by the
-    original A-E scenarios' accounts."""
+    original A-E scenarios' accounts. Set BROKER_DRY_RUN=1 to exercise the
+    full decision logic without the live SCP mutation -- see broker.py."""
     if target_account == broker.REAL_ACCOUNT_NAME and policy_id == broker.INSTANCE_TYPE_SCP_NAME:
         result = broker.grant_instance_type_exception(target_account, new_state)
         grant = broker.request_scoped_credential(policy_id, target_account, duration)

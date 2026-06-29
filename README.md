@@ -1,9 +1,12 @@
 # Agent + Guardrails Demo
 
-Two tool-calling agents, identical tools/prompt/mandate. One calls Claude
-direct, one calls Claude via Amazon Bedrock with Bedrock Guardrails attached.
-Same task, only the platform wrapper differs. See `DESIGN.md` for the
-architecture and why each piece exists.
+Two tool-calling agents, identical tools/prompt/mandate, both calling the
+same model via Amazon Bedrock -- one with Bedrock Guardrails attached, one
+without. Same task, only the platform wrapper (guardrail or not) differs.
+The model itself defaults to an open-source stand-in (see "Using a different
+model" below) until this AWS account's Anthropic use-case form is approved;
+swap to a real Claude model with one env var, no code changes. See
+`DESIGN.md` for the architecture and why each piece exists.
 
 ## Setup
 
@@ -15,7 +18,7 @@ python3 -m venv .venv
 # e.g. `aws configure --profile sandbox`.
 
 # Create the Bedrock Guardrail (idempotent, safe to re-run after editing config):
-AWS_PROFILE=sandbox .venv/bin/python guardrail_setup.py
+AWS_PROFILE=sandbox .venv/bin/python infra/guardrail_setup.py
 ```
 
 This writes `guardrail_config.json` (gitignored — environment-specific).
@@ -24,9 +27,9 @@ This writes `guardrail_config.json` (gitignored — environment-specific).
 
 ```bash
 rm -f scenario_trace.log   # optional, keeps the trace clean for a fresh run
-AWS_PROFILE=sandbox .venv/bin/python run_scenario.py A   # claude-direct, protected policy -> succeeds (the risk)
-AWS_PROFILE=sandbox .venv/bin/python run_scenario.py B   # bedrock+guardrails, same request -> blocked
-AWS_PROFILE=sandbox .venv/bin/python run_scenario.py C   # bedrock+guardrails, unprotected policy -> temporary scoped override
+AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py A   # model-direct, protected policy -> succeeds (the risk)
+AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py B   # bedrock+guardrails, same request -> blocked
+AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py C   # bedrock+guardrails, unprotected policy -> temporary scoped override
 cat scenario_trace.log
 ```
 
@@ -39,12 +42,22 @@ workaround instead of attempting the policy change). Re-run if a scenario
 doesn't land on the outcome you want to show; this variance is expected, not
 a bug — see `DESIGN.md`'s reliability notes.
 
+`demo_recordings/` has one saved clean transcript per scenario (A/B/C) as a
+fallback if a live take doesn't land where you want it to during a
+presentation -- re-generate these (same commands, redirect output to the
+file) within 24h of any live demo, since model/infra behavior can drift.
+
+Set `AGENT_TEMPERATURE` (e.g. `0.2`) to reduce phrasing/path variance across
+takes without scripting the outcome outright -- lower values make the model
+more likely to repeat its previous choice given a similar prompt, not
+guaranteed to. Unset by default (normal sampling).
+
 ### Using a different model
 
 Both agents read `AGENT_MODEL_ID` from the environment (falls back to the
 open-source `qwen.qwen3-coder-next` stand-in):
 ```bash
-AGENT_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0" AWS_PROFILE=sandbox .venv/bin/python run_scenario.py A
+AGENT_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0" AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py A
 ```
 Requires the account's Anthropic-model use-case form to be approved in the
 Bedrock console (Model access page) — Bedrock blocks Anthropic models
@@ -108,10 +121,50 @@ aws iam put-role-policy --profile sandbox \
 aws iam get-role --profile sandbox --role-name github-agent-ou-policy-demo --query 'Role.Arn' --output text
 ```
 
-Note: the broker and `update_org_policy` are local-mock Python in this demo,
-not real AWS API calls, so the CI role only needs Bedrock access. If you
-later wire the broker to real per-account AssumeRole grants, give those
-roles their own narrow trust policy rather than widening this one.
+Note: the broker and `update_org_policy` are local-mock Python for
+`dev-sandbox`/`dev-shared`/`prod-core` -- no real AWS API calls for those
+three accounts. `demo-prod-core` is a real AWS Organizations member account,
+and the broker does real `organizations:UpdatePolicy` calls against its
+SCPs (see `agent/broker.py`, `DESIGN.md`'s "JIT access broker" section). The
+CI role therefore needs Organizations + SSM access too, not just Bedrock --
+add this second inline policy (note the explicit `Deny` on touching the
+protected `no-public-ip-ec2` SCP by ID, the real IAM-level backstop matching
+the broker's own protected-policy check):
+
+```bash
+cat > /tmp/github-agent-org-permissions.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowOrgReadAndOverrideWrites",
+      "Effect": "Allow",
+      "Action": [
+        "organizations:DescribeOrganization", "organizations:ListRoots",
+        "organizations:ListAccounts", "organizations:ListPolicies",
+        "organizations:ListPoliciesForTarget", "organizations:DescribePolicy",
+        "organizations:UpdatePolicy", "ssm:GetParameter", "ssm:GetParameters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyTouchingTheProtectedPublicIpSCP",
+      "Effect": "Deny",
+      "Action": ["organizations:DetachPolicy", "organizations:DeletePolicy", "organizations:UpdatePolicy"],
+      "Resource": "arn:aws:organizations::<ACCOUNT_ID>:policy/<ORG_ID>/service_control_policy/<no-public-ip-ec2 policy ID>"
+    }
+  ]
+}
+EOF
+aws iam put-role-policy --profile sandbox \
+  --role-name github-agent-ou-policy-demo \
+  --policy-name agent-org-permissions \
+  --policy-document file:///tmp/github-agent-org-permissions.json
+```
+
+If you later wire the local-mock accounts' broker path to real per-account
+AssumeRole grants too, give those roles their own narrow trust policy rather
+than widening this one.
 
 ### Repo configuration
 
@@ -121,6 +174,9 @@ gh variable set AWS_REGION --body "us-east-1"
 gh variable set BEDROCK_GUARDRAIL_ID --body "$(jq -r .guardrail_id guardrail_config.json)"
 gh variable set BEDROCK_GUARDRAIL_VERSION --body "$(jq -r .guardrail_version guardrail_config.json)"
 gh variable set AGENT_MODEL_ID --body "qwen.qwen3-coder-next"
+# Set to "1" before a live demo to exercise the real-AWS broker path against
+# demo-prod-core without it mutating live SCP JSON -- see DESIGN.md.
+gh variable set BROKER_DRY_RUN --body "1"
 ```
 
 ### Using it
@@ -156,7 +212,7 @@ Cant resize EBS volume past 500GB
 
 ### What are you trying to do?
 
-Need a bigger volume for this sprint dev workload' .venv/bin/python github_issue_agent.py
+Need a bigger volume for this sprint dev workload' .venv/bin/python github_integration/github_issue_agent.py
 cat issue_comment.md
 ```
 

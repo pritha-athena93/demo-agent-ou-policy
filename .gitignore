@@ -7,3 +7,4 @@ guardrail_config.json
 issue_comment.md
 .claude/
 .vscode/
+infra/scp_snapshot_*.json

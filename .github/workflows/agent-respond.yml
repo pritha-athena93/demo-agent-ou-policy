@@ -171,7 +171,11 @@ jobs:
           BEDROCK_GUARDRAIL_ID: ${{ vars.BEDROCK_GUARDRAIL_ID }}
           BEDROCK_GUARDRAIL_VERSION: ${{ vars.BEDROCK_GUARDRAIL_VERSION }}
           AGENT_MODEL_ID: ${{ vars.AGENT_MODEL_ID }}
-        run: python github_issue_agent.py
+          # Set the BROKER_DRY_RUN repo variable to "1" before a live demo to
+          # exercise the real-AWS broker's decision logic against
+          # demo-prod-core without it actually mutating live SCP JSON.
+          BROKER_DRY_RUN: ${{ vars.BROKER_DRY_RUN }}
+        run: python github_integration/github_issue_agent.py
 
       - name: Label HITL if the agent didn't reach a final answer
         if: steps.run_agent.outputs.needs_hitl == 'true'

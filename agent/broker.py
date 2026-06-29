@@ -12,6 +12,12 @@ local-mock accounts used by run_scenario.py's A-E scenarios and never touch
 real AWS. Account IDs and SCP IDs for the real account are looked up by name
 at call time -- never hardcoded -- so they survive the org being torn down
 and recreated.
+
+Set BROKER_DRY_RUN=1 to do the full real-AWS lookup/describe/diff for
+grant_instance_type_exception/grant_tag_exception without the final
+update_policy call -- useful for a live demo against demo-prod-core where a
+glitch shouldn't be able to leave a real org policy in a bad state. The
+returned dict's `dry_run` key reflects which mode produced it.
 """
 
 import datetime
@@ -44,6 +50,15 @@ KNOWN_TAG_NAMES = ["Owner", "Department"]
 
 AWS_PROFILE = os.environ.get("AWS_PROFILE")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+# When set, grant_instance_type_exception/grant_tag_exception still do the
+# full real-AWS lookup/describe/diff (so the broker's decision logic is
+# exercised exactly as normal) but skip the final update_policy call --
+# returns what would have been written instead of mutating the live SCP.
+# For demo safety: a glitch on stage shouldn't be able to leave a real org
+# policy in a bad state. Off by default -- 1/true/yes (case-insensitive) to
+# enable.
+BROKER_DRY_RUN = os.environ.get("BROKER_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 _exceptions: dict = {}
 _org_client = None
@@ -114,7 +129,16 @@ def grant_instance_type_exception(target_account: str, instance_type: str) -> di
     # Sid must be alphanumeric only (no hyphens) per IAM policy grammar --
     # account_id is already digits-only, safe to use directly.
     exception_sid = f"Account{account_id}{ACCOUNT_EXCEPTION_SID_SUFFIX}"
-    base_statement = next(s for s in statements if ACCOUNT_EXCEPTION_SID_SUFFIX not in s["Sid"])
+    base_statement = next((s for s in statements if ACCOUNT_EXCEPTION_SID_SUFFIX not in s["Sid"]), None)
+    if base_statement is None:
+        # A schema-shape surprise on the real policy (e.g. every statement
+        # already carries the exception suffix, or the policy is empty)
+        # should fail closed with a readable error, not propagate a raw
+        # StopIteration from the bare next(...) this replaced.
+        raise BrokerDenied(
+            f"no base statement found in SCP '{policy_id}' without the "
+            f"'{ACCOUNT_EXCEPTION_SID_SUFFIX}' suffix -- policy shape changed?"
+        )
 
     base_statement.setdefault("Condition", {}).setdefault("StringNotEquals", {})["aws:PrincipalAccount"] = account_id
 
@@ -136,8 +160,12 @@ def grant_instance_type_exception(target_account: str, instance_type: str) -> di
     if instance_type not in allowed_patterns:
         allowed_patterns.append(instance_type)
 
-    client.update_policy(PolicyId=policy_id, Content=json.dumps(content))
-    return {"policy_id": policy_id, "account_id": account_id, "allowed_patterns": allowed_patterns}
+    if not BROKER_DRY_RUN:
+        client.update_policy(PolicyId=policy_id, Content=json.dumps(content))
+    return {
+        "policy_id": policy_id, "account_id": account_id, "allowed_patterns": allowed_patterns,
+        "dry_run": BROKER_DRY_RUN,
+    }
 
 
 def _resolve_tag_name(raw: str) -> str:
@@ -169,8 +197,12 @@ def grant_tag_exception(target_account: str, tag_name: str) -> dict:
         raise BrokerDenied(f"no tag requirement statement found for tag '{tag_name}'")
 
     statement.setdefault("Condition", {}).setdefault("StringNotEquals", {})["aws:PrincipalAccount"] = account_id
-    client.update_policy(PolicyId=policy_id, Content=json.dumps(content))
-    return {"policy_id": policy_id, "account_id": account_id, "exempted_tag": resolved_tag}
+    if not BROKER_DRY_RUN:
+        client.update_policy(PolicyId=policy_id, Content=json.dumps(content))
+    return {
+        "policy_id": policy_id, "account_id": account_id, "exempted_tag": resolved_tag,
+        "dry_run": BROKER_DRY_RUN,
+    }
 
 
 def _assert_account_boundary(target_account: str) -> None:

@@ -1,6 +1,14 @@
-"""Claude-direct variant. Calls Claude via Bedrock, no guardrail attached.
-update_org_policy executes immediately when the model calls it -- no
-intermediate check, no broker, no guardrail. This is the gap the demo shows.
+"""model-direct variant. Calls the same Bedrock model as the guardrails
+variant, no guardrail attached. update_org_policy executes immediately when
+the model calls it -- no intermediate check, no broker, no guardrail. This
+is the gap the demo shows.
+
+Named "model-direct," not "Claude-direct": MODEL_ID currently defaults to an
+open-source model (see the note below), and nothing should claim Claude is
+running unless it actually is. If AGENT_MODEL_ID is set to a us.anthropic.*
+inference profile, this variant does call real Claude -- the variant's
+behavior (no enforcement layer) is identical either way; only the model
+identity changes.
 """
 
 import os
@@ -15,7 +23,7 @@ import logger
 # sandbox account. Swap back to an anthropic.* / us.anthropic.* model ID
 # once the use-case form is approved -- agent loop/tool code is unchanged.
 MODEL_ID = os.environ.get("AGENT_MODEL_ID", "qwen.qwen3-coder-next")
-VARIANT = "claude-direct"
+VARIANT = "model-direct"
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 AWS_PROFILE = os.environ.get("AWS_PROFILE")  # unset in CI -- uses default credential chain
 
