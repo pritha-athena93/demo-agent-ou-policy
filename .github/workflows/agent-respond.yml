@@ -1,0 +1,86 @@
+name: Policy-block agent responder
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  id-token: write   # required for AWS OIDC
+  contents: read
+  issues: write
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - name: Gate on collaborator status or maintainer approval label
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const trustedAssociations = ["OWNER", "MEMBER", "COLLABORATOR"];
+            const isTrustedAuthor = trustedAssociations.includes(context.payload.issue.author_association);
+            const isApprovalLabelAdded = context.payload.action === "labeled" &&
+              context.payload.label && context.payload.label.name === "approved-run";
+            const isOpenedByTrusted = context.payload.action === "opened" && isTrustedAuthor;
+
+            const shouldRun = isOpenedByTrusted || isApprovalLabelAdded;
+            core.setOutput("should_run", shouldRun ? "true" : "false");
+
+            if (context.payload.action === "opened" && !isTrustedAuthor) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                labels: ["needs-maintainer-approval"],
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: "Thanks for the report. This repo's agent only auto-runs for issues opened by maintainers/collaborators, since it makes real AWS calls. A maintainer can run it for you by adding the `approved-run` label to this issue.",
+              });
+            }
+
+  run-agent:
+    needs: decide
+    if: needs.decide.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -q boto3
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Run agent against the issue
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          BEDROCK_GUARDRAIL_ID: ${{ vars.BEDROCK_GUARDRAIL_ID }}
+          BEDROCK_GUARDRAIL_VERSION: ${{ vars.BEDROCK_GUARDRAIL_VERSION }}
+          AGENT_MODEL_ID: ${{ vars.AGENT_MODEL_ID }}
+        run: python github_issue_agent.py
+
+      - name: Post agent response as a comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("issue_comment.md", "utf8");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body,
+            });

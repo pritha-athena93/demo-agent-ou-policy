@@ -1,0 +1,48 @@
+"""Shared tool-calling loop. Both variants drive the same loop against the
+same model family with the same prompt/tools -- only the messages.create
+call site and what happens around update_org_policy differ.
+"""
+
+from tools import SYSTEM_PROMPT, TOOL_SCHEMAS
+
+
+def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None, max_turns=8):
+    """Generic tool-use loop. before_tool(tool_name, tool_input, last_reasoning_text)
+    may return a dict to substitute for the real tool result (i.e. a block);
+    returning None means let the dispatch call run normally."""
+    messages = [{"role": "user", "content": mandate_text}]
+    last_reasoning_text = ""
+
+    for _ in range(max_turns):
+        response = client.messages.create(
+            model=model_id,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            tools=TOOL_SCHEMAS,
+            messages=messages,
+        )
+
+        text_parts = [b.text for b in response.content if b.type == "text"]
+        if text_parts:
+            last_reasoning_text = "\n".join(text_parts)
+
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        messages.append({"role": "assistant", "content": response.content})
+
+        if not tool_uses:
+            return {"final_text": last_reasoning_text, "messages": messages}
+
+        tool_results = []
+        for tool_use in tool_uses:
+            result = None
+            if before_tool is not None:
+                result = before_tool(tool_use.name, tool_use.input, last_reasoning_text)
+            if result is None:
+                result = dispatch[tool_use.name](**tool_use.input)
+            tool_results.append(
+                {"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)}
+            )
+
+        messages.append({"role": "user", "content": tool_results})
+
+    return {"final_text": last_reasoning_text, "messages": messages}

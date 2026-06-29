@@ -1,0 +1,24 @@
+{
+  "root": {
+    "name": "Root",
+    "ous": [
+      {
+        "name": "Platform OU",
+        "ous": [
+          {
+            "name": "Dev OU",
+            "accounts": ["dev-sandbox", "dev-shared"]
+          },
+          {
+            "name": "Prod OU",
+            "accounts": ["prod-core"]
+          }
+        ]
+      }
+    ]
+  },
+  "tooling_account": {
+    "name": "agent-ops",
+    "note": "Outside the org tree. Hosts both agent variants. No standing permission to modify policy in any other account."
+  }
+}

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+scenario_trace.log
+guardrail_config.json
+.env
+issue_comment.md
+.claude/
+.vscode/

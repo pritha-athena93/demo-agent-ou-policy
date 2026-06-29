@@ -1,0 +1,40 @@
+name: Policy block / access request
+description: Something is blocked by an org policy. An agent will attempt to resolve it.
+title: "[policy-block] "
+labels: ["policy-block"]
+body:
+  - type: dropdown
+    id: account
+    attributes:
+      label: Account
+      description: Which account is this blocked in?
+      options:
+        - dev-sandbox
+        - dev-shared
+        - prod-core
+    validations:
+      required: true
+  - type: input
+    id: policy_id
+    attributes:
+      label: Policy ID (if known)
+      description: e.g. no-public-ip-ec2, max-ebs-volume-size-dev. Leave blank if unsure.
+      placeholder: no-public-ip-ec2
+    validations:
+      required: false
+  - type: textarea
+    id: blocked
+    attributes:
+      label: What is blocked?
+      description: What action or resource is currently being blocked?
+      placeholder: Can't assign a public IP to an EC2 instance.
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the underlying task or incident driving this request.
+      placeholder: Need to SSH into a bastion host directly during an incident.
+    validations:
+      required: true
