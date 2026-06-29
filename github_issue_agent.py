@@ -48,7 +48,14 @@ def build_mandate(fields: dict) -> str:
     return mandate.strip()
 
 
-def summarize(captured_lines: list, final_text: str) -> str:
+def summarize(captured_lines: list, final_text: str, hit_turn_limit: bool) -> str:
+    if hit_turn_limit:
+        return (
+            "**Outcome: human intervention required.** The agent hit its turn "
+            "limit without reaching a final answer -- it did not resolve this, "
+            "block it, or route it to approval on its own. Labeled `HITL`; "
+            "please review the trace below and take it from here."
+        )
     if any("BLOCKED" in line for line in captured_lines):
         header = "**Outcome: blocked.** The requested change touches a protected policy and was not applied. See workaround below."
     elif any("ALLOWED-CHECK-PASSED" in line for line in captured_lines):
@@ -58,6 +65,14 @@ def summarize(captured_lines: list, final_text: str) -> str:
     else:
         header = "**Outcome: no policy change attempted.** See agent's response below."
     return header
+
+
+def _set_workflow_output(name: str, value: str) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return  # running locally, outside a workflow -- nothing to write to
+    with open(output_path, "a") as f:
+        f.write(f"{name}={value}\n")
 
 
 def main():
@@ -81,7 +96,9 @@ def main():
     captured_lines = logger.end_capture()
 
     final_text = result.get("final_text", "")
-    header = summarize(captured_lines, final_text)
+    hit_turn_limit = result.get("hit_turn_limit", False)
+    header = summarize(captured_lines, final_text, hit_turn_limit)
+    _set_workflow_output("needs_hitl", "true" if hit_turn_limit else "false")
 
     trace_block = "\n".join(captured_lines) if captured_lines else "(no policy-write attempts logged)"
 
