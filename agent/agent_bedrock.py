@@ -59,7 +59,8 @@ def _apply_guardrail(bedrock_runtime, reasoning_text: str) -> bool:
     return resp.get("action") == "GUARDRAIL_INTERVENED"
 
 
-def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allowed_tools: set | None = None) -> dict:
+def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allowed_tools: set | None = None,
+        known_new_state: dict | None = None) -> dict:
     session = boto3.Session(profile_name=AWS_PROFILE, region_name=REGION) if AWS_PROFILE else boto3.Session(region_name=REGION)
     runtime = session.client("bedrock-runtime")
     client = BedrockMessagesClient(runtime, MODEL_ID)
@@ -82,11 +83,28 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allo
         registry_check = check_policy_registry(policy_id, target_account)
         registry_flagged = registry_check["protected"]
 
-        if registry_flagged:
+        # For the real account, also check the SCP's own AWS tag --
+        # independently verifiable in the AWS console (Policies > SCP >
+        # Tags), not just trusted from this repo's local Python dict. The
+        # two should agree, but this is the source of truth for whether the
+        # real no-public-ip-ec2 SCP is actually marked protected; the local
+        # registry could drift from it (e.g. someone retags the real SCP in
+        # the console without anyone updating policy_registry.py).
+        aws_tag_flagged = False
+        if target_account == broker.REAL_ACCOUNT_NAME:
+            aws_tag_flagged = broker.is_real_scp_tagged_protected(policy_id)
+
+        if registry_flagged or aws_tag_flagged:
             guardrail_flagged = _apply_guardrail(runtime, last_reasoning_text)
-            layer = "guardrail+policy-registry" if guardrail_flagged else "policy-registry"
+            layers = []
+            if registry_flagged:
+                layers.append("policy-registry")
+            if aws_tag_flagged:
+                layers.append("aws-scp-tag")
+            if guardrail_flagged:
+                layers.append("guardrail")
             logger.log(VARIANT, account, f"update_org_policy({policy_id})",
-                       "BLOCKED", f"caught by {layer}")
+                       "BLOCKED", f"caught by {'+'.join(layers)}")
             return propose_workaround(f"blocked change to {policy_id}", policy_id)
 
         # Deterministic SSM-backed allowlist gate, only relevant to the real
@@ -104,5 +122,5 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allo
         return None
 
     result = run_agent_loop(client, MODEL_ID, mandate_text, DISPATCH_BEDROCK, VARIANT, account,
-                             before_tool=before_tool, allowed_tools=allowed_tools)
+                             before_tool=before_tool, allowed_tools=allowed_tools, known_new_state=known_new_state)
     return result

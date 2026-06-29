@@ -31,6 +31,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
 
 import agent_bedrock
+import broker
 import logger
 import tools
 from policy_registry import is_known_policy_id
@@ -284,6 +285,7 @@ def main():
         )
         return
 
+    known_new_state = {}
     if round_number == 1:
         mandate, input_was_flagged = build_round1_mandate(fields)
         allowed_tools = ROUND1_TOOLS
@@ -293,8 +295,27 @@ def main():
         mandate, input_was_flagged = build_round2_mandate(fields, round1_comment_body, human_reply_raw)
         allowed_tools = ROUND2_TOOLS
 
+        # new_state has been mangled by the model three separate ways across
+        # prior runs (a descriptive sentence, the literal string 'none', and
+        # a bogus value entirely). The real tag name / instance type is
+        # reliably present in the original issue text and the requester's
+        # reply -- resolve it deterministically here instead of trusting the
+        # model's restatement; agent_common.run_agent_loop applies this as a
+        # forced correction the same way it already does for target_account.
+        combined_context = " ".join([
+            fields.get("What is blocked?", ""),
+            fields.get("What are you trying to do?", ""),
+            human_reply_raw,
+        ])
+        resolved_tag = broker.find_known_tag_name(combined_context)
+        if resolved_tag:
+            known_new_state[broker.TAG_SCP_NAME] = resolved_tag
+        resolved_instance_type = broker.find_known_instance_type(combined_context)
+        if resolved_instance_type:
+            known_new_state[broker.INSTANCE_TYPE_SCP_NAME] = resolved_instance_type
+
     logger.begin_capture()
-    result = agent_bedrock.run(mandate, account, allowed_tools=allowed_tools)
+    result = agent_bedrock.run(mandate, account, allowed_tools=allowed_tools, known_new_state=known_new_state)
     captured_lines = logger.end_capture()
 
     final_text = result.get("final_text", "")

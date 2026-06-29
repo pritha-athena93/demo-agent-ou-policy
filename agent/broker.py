@@ -98,6 +98,30 @@ def _find_policy_by_name(policy_name: str) -> dict:
     raise BrokerDenied(f"no SCP named '{policy_name}' found in the organization")
 
 
+def is_real_scp_tagged_protected(policy_name: str) -> bool:
+    """Real AWS tag check, independent of policy_registry.py's local data.
+
+    policy_registry.py's REGISTRY is local Python -- for the real
+    demo-prod-core SCPs, nothing ties its "protected" field to the actual
+    AWS resource; the two could drift (someone could detach/recreate the
+    SCP in the console with the same name and a different protection
+    posture, and this codebase would never know). This queries the real
+    SCP's own AWS tags (Key=Protected) as an independently-verifiable
+    source of truth for the real-AWS path specifically -- see
+    agent_bedrock.py's before_tool, which checks this in addition to the
+    local registry for target_account == REAL_ACCOUNT_NAME. Fails closed:
+    treats "tag missing" or "policy not found" the same as protected,
+    rather than silently treating an AWS error as "not protected"."""
+    try:
+        policy = _find_policy_by_name(policy_name)
+        client = _organizations_client()
+        tags = client.list_tags_for_resource(ResourceId=policy["Id"])["Tags"]
+    except BrokerDenied:
+        return True
+    tag_value = next((t["Value"] for t in tags if t["Key"] == "Protected"), "")
+    return tag_value.strip().lower() == "true"
+
+
 def get_allowed_instance_types_from_ssm() -> list:
     session = boto3.Session(profile_name=AWS_PROFILE) if AWS_PROFILE else boto3.Session()
     ssm = session.client("ssm", region_name=AWS_REGION)
@@ -112,6 +136,35 @@ def is_t3_family(instance_type: str) -> bool:
 def is_instance_type_overridable(instance_type: str) -> bool:
     """Deterministic, SSM-backed -- never an LLM judgment call."""
     return instance_type in get_allowed_instance_types_from_ssm()
+
+
+_INSTANCE_TYPE_PATTERN = re.compile(r"\b[a-z][0-9]+[a-z]*\.[0-9]*[a-z]+\b", re.IGNORECASE)
+
+
+def find_known_instance_type(text: str) -> str | None:
+    """Extracts an EC2-instance-type-shaped token (e.g. 't4g.small',
+    'm5.4xlarge') out of arbitrary text, or None if none appears. Used to
+    resolve new_state from the original issue/reply text directly rather
+    than trusting the model's restated copy of it -- see
+    find_known_tag_name's docstring for why that copy can't be trusted."""
+    match = _INSTANCE_TYPE_PATTERN.search(text)
+    return match.group(0).lower() if match else None
+
+
+def find_known_tag_name(text: str) -> str | None:
+    """Extracts a known tag name (Owner/Department) out of arbitrary text,
+    or None if neither appears. This is the generalized form of
+    _resolve_tag_name, usable on the *original* issue/reply text (which
+    reliably states the real tag name, e.g. "without an Owner tag") rather
+    than on the model's new_state argument, which has been observed
+    mangling it three different ways (a full sentence, the literal string
+    'none', and -- separately -- the wrong target_account entirely). Same
+    fix shape as target_account in agent_common.py: stop trusting the
+    model's restatement of a fact the code can already pin down itself."""
+    for tag in KNOWN_TAG_NAMES:
+        if re.search(rf"\b{re.escape(tag)}\b", text, re.IGNORECASE):
+            return tag
+    return None
 
 
 def grant_instance_type_exception(target_account: str, instance_type: str) -> dict:

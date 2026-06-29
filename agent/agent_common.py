@@ -9,7 +9,7 @@ import logger
 
 
 def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None,
-                    max_turns=12, allowed_tools=None):
+                    max_turns=12, allowed_tools=None, known_new_state=None):
     """Generic tool-use loop. before_tool(tool_name, tool_input, last_reasoning_text)
     may return a dict to substitute for the real tool result (i.e. a block);
     returning None means let the dispatch call run normally.
@@ -21,7 +21,16 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
     what the round-1 mandate text says. Same "the prompt doesn't enforce,
     code does" principle as everything else in this file, just applied to
     which tools are reachable at all rather than whether a specific call is
-    allowed."""
+    allowed.
+
+    known_new_state, if given, is a {policy_id: new_state} map of values
+    deterministically extracted from the original request text (see
+    broker.find_known_tag_name/find_known_instance_type) -- the model's
+    new_state argument for update_org_policy has been observed mangled three
+    separate ways (a descriptive sentence, the literal string 'none', and a
+    bogus target_account confused with it), so when a known-correct value
+    exists for the policy_id being called, it overrides the model's copy the
+    same way target_account does below."""
     messages = [{"role": "user", "content": mandate_text}]
     last_reasoning_text = ""
     last_tool_call = None
@@ -66,6 +75,20 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
                     logger.log(variant_name, account, f"{tool_use.name}(target_account)", "INFO",
                                f"corrected target_account from model's '{model_value}' to '{account}'")
                     tool_use.input["target_account"] = account
+
+            # Same correction, applied to new_state -- only for
+            # update_org_policy (the only tool with that field) and only
+            # when a deterministically-known value exists for this
+            # policy_id. check_policy_registry also takes a policy_id but
+            # has no new_state field, so this must not fire for it.
+            if (tool_use.name == "update_org_policy" and known_new_state
+                    and tool_use.input.get("policy_id") in known_new_state):
+                known_value = known_new_state[tool_use.input["policy_id"]]
+                model_value = tool_use.input.get("new_state")
+                if model_value != known_value:
+                    logger.log(variant_name, account, f"update_org_policy(new_state)", "INFO",
+                               f"corrected new_state from model's '{model_value}' to '{known_value}'")
+                    tool_use.input["new_state"] = known_value
 
             # Structural/allowlist validation runs before before_tool and
             # dispatch, on every variant. The model's tool-call arguments may

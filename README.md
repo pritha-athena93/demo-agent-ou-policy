@@ -143,7 +143,8 @@ cat > /tmp/github-agent-org-permissions.json <<'EOF'
         "organizations:DescribeOrganization", "organizations:ListRoots",
         "organizations:ListAccounts", "organizations:ListPolicies",
         "organizations:ListPoliciesForTarget", "organizations:DescribePolicy",
-        "organizations:UpdatePolicy", "ssm:GetParameter", "ssm:GetParameters"
+        "organizations:UpdatePolicy", "organizations:ListTagsForResource",
+        "ssm:GetParameter", "ssm:GetParameters"
       ],
       "Resource": "*"
     },
@@ -160,6 +161,19 @@ aws iam put-role-policy --profile sandbox \
   --role-name github-agent-ou-policy-demo \
   --policy-name agent-org-permissions \
   --policy-document file:///tmp/github-agent-org-permissions.json
+```
+
+Also tag the real `no-public-ip-ec2` SCP itself as protected -- this is an
+independently-verifiable source of truth in the AWS console (Organizations >
+Policies > SCP > Tags), separate from `policy_registry.py`'s local data.
+`agent_bedrock.py` checks this tag in addition to the local registry for the
+real account (`broker.is_real_scp_tagged_protected`), so the two can't
+silently drift without the AWS-side check catching it:
+
+```bash
+aws organizations tag-resource --profile sandbox \
+  --resource-id <no-public-ip-ec2 policy ID> \
+  --tags Key=Protected,Value=true
 ```
 
 If you later wire the local-mock accounts' broker path to real per-account
