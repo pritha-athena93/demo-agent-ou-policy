@@ -38,6 +38,13 @@ def build_mandate(fields: dict) -> str:
     mandate = f"{goal} {blocked} is currently blocked."
     if policy_hint and policy_hint.lower() not in ("_no response_", ""):
         mandate += f" The policy involved may be {policy_hint}."
+    mandate += (
+        " This is an async request with no one available to answer follow-up "
+        "questions. Decide and act using the tools available -- do not ask "
+        "clarifying questions or offer to help further. End with a definitive "
+        "outcome: either the change is made, it's blocked with a workaround, "
+        "or it's routed to human approval."
+    )
     return mandate.strip()
 
 

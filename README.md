@@ -132,8 +132,12 @@ gh variable set AGENT_MODEL_ID --body "qwen.qwen3-coder-next"
    automatically and comments back the outcome.
 3. If the opener isn't a collaborator, the issue gets labeled
    `needs-maintainer-approval` instead. A maintainer can trigger the agent by
-   adding the `approved-run` label.
-4. Check the Actions tab for the run, and the issue comments for the result.
+   adding the `approved-run` label, or commenting `/run-agent` on the issue.
+4. Any maintainer/collaborator can re-run the agent on an existing issue at
+   any time by commenting `/run-agent` (e.g. after editing the issue, or to
+   get a second take given LLM-phrasing variance). Comments from
+   non-collaborators or bots are ignored.
+5. Check the Actions tab for the run, and the issue comments for the result.
 
 ### Testing the issue handler without GitHub
 

@@ -3,6 +3,8 @@ name: Policy-block agent responder
 on:
   issues:
     types: [opened, labeled]
+  issue_comment:
+    types: [created]
 
 permissions:
   id-token: write   # required for AWS OIDC
@@ -15,21 +17,38 @@ jobs:
     outputs:
       should_run: ${{ steps.gate.outputs.should_run }}
     steps:
-      - name: Gate on collaborator status or maintainer approval label
+      - name: Gate on collaborator status, approval label, or /run-agent comment
         id: gate
         uses: actions/github-script@v7
         with:
           script: |
             const trustedAssociations = ["OWNER", "MEMBER", "COLLABORATOR"];
-            const isTrustedAuthor = trustedAssociations.includes(context.payload.issue.author_association);
+
+            // issue_comment fires for both issues and PRs -- only handle issues.
+            if (context.eventName === "issue_comment" && context.payload.issue.pull_request) {
+              core.setOutput("should_run", "false");
+              return;
+            }
+
+            const isTrustedIssueAuthor = trustedAssociations.includes(context.payload.issue.author_association);
+            const isOpenedByTrusted = context.payload.action === "opened" && isTrustedIssueAuthor;
+
             const isApprovalLabelAdded = context.payload.action === "labeled" &&
               context.payload.label && context.payload.label.name === "approved-run";
-            const isOpenedByTrusted = context.payload.action === "opened" && isTrustedAuthor;
 
-            const shouldRun = isOpenedByTrusted || isApprovalLabelAdded;
+            let isTriggerComment = false;
+            if (context.eventName === "issue_comment" && context.payload.action === "created") {
+              const comment = context.payload.comment;
+              const isBot = comment.user.type === "Bot";
+              const isTrustedCommenter = trustedAssociations.includes(comment.author_association);
+              const isCommand = comment.body.trim().toLowerCase().startsWith("/run-agent");
+              isTriggerComment = !isBot && isTrustedCommenter && isCommand;
+            }
+
+            const shouldRun = isOpenedByTrusted || isApprovalLabelAdded || isTriggerComment;
             core.setOutput("should_run", shouldRun ? "true" : "false");
 
-            if (context.payload.action === "opened" && !isTrustedAuthor) {
+            if (context.payload.action === "opened" && !isTrustedIssueAuthor) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -40,8 +59,23 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.issue.number,
-                body: "Thanks for the report. This repo's agent only auto-runs for issues opened by maintainers/collaborators, since it makes real AWS calls. A maintainer can run it for you by adding the `approved-run` label to this issue.",
+                body: "Thanks for the report. This repo's agent only auto-runs for issues opened by maintainers/collaborators, since it makes real AWS calls. A maintainer can run it for you by adding the `approved-run` label, or commenting `/run-agent`.",
               });
+            }
+
+            if (context.eventName === "issue_comment" && context.payload.action === "created" &&
+                !context.payload.issue.pull_request) {
+              const comment = context.payload.comment;
+              const isCommand = comment.body.trim().toLowerCase().startsWith("/run-agent");
+              const isTrustedCommenter = trustedAssociations.includes(comment.author_association);
+              if (isCommand && !isTrustedCommenter && comment.user.type !== "Bot") {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.issue.number,
+                  body: "`/run-agent` only works for maintainers/collaborators, since it makes real AWS calls.",
+                });
+              }
             }
 
   run-agent:
