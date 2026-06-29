@@ -7,13 +7,24 @@ from tools import SYSTEM_PROMPT, TOOL_SCHEMAS, validate_tool_input
 from broker import BrokerDenied
 
 
-def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None, max_turns=12):
+def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None,
+                    max_turns=12, allowed_tools=None):
     """Generic tool-use loop. before_tool(tool_name, tool_input, last_reasoning_text)
     may return a dict to substitute for the real tool result (i.e. a block);
-    returning None means let the dispatch call run normally."""
+    returning None means let the dispatch call run normally.
+
+    allowed_tools, if given, is a coarse code-level allowlist checked before
+    validate_tool_input/before_tool/dispatch -- e.g. the GitHub-issue round-1
+    assessment step must not be able to call update_org_policy or
+    request_human_approval no matter what the model decides, regardless of
+    what the round-1 mandate text says. Same "the prompt doesn't enforce,
+    code does" principle as everything else in this file, just applied to
+    which tools are reachable at all rather than whether a specific call is
+    allowed."""
     messages = [{"role": "user", "content": mandate_text}]
     last_reasoning_text = ""
     last_tool_call = None
+    policy_write_attempts = []
 
     for _ in range(max_turns):
         response = client.messages.create(
@@ -32,7 +43,9 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
         messages.append({"role": "assistant", "content": response.content})
 
         if not tool_uses:
-            return {"final_text": last_reasoning_text, "messages": messages, "hit_turn_limit": False}
+            final_text = _prepend_verified_outcome(last_reasoning_text, policy_write_attempts)
+            return {"final_text": final_text, "messages": messages, "hit_turn_limit": False,
+                    "policy_write_attempts": policy_write_attempts}
 
         tool_results = []
         for tool_use in tool_uses:
@@ -43,24 +56,44 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
             # just earlier and broader, so an invalid call never even reaches
             # (and never gets logged as a spurious attempt by) the broker or
             # guardrail layer.
-            validation_error = validate_tool_input(tool_use.name, tool_use.input)
-            if validation_error is not None:
-                result = {"error": validation_error}
+            if allowed_tools is not None and tool_use.name not in allowed_tools:
+                result = {"error": f"tool '{tool_use.name}' is not permitted in this round"}
             else:
-                result = None
-                if before_tool is not None:
-                    result = before_tool(tool_use.name, tool_use.input, last_reasoning_text)
-                if result is None:
-                    try:
-                        result = dispatch[tool_use.name](**tool_use.input)
-                    except BrokerDenied as e:
-                        # Real AWS lookups (account/policy name resolution,
-                        # SCP statement lookup) can fail closed here too, not
-                        # just the protected-policy check -- surface it to the
-                        # model as a denial it can react to (e.g. escalate to
-                        # request_human_approval) instead of crashing the run.
-                        result = {"error": f"denied: {e}"}
+                validation_error = validate_tool_input(tool_use.name, tool_use.input)
+                if validation_error is not None:
+                    result = {"error": validation_error}
+                else:
+                    result = None
+                    if before_tool is not None:
+                        result = before_tool(tool_use.name, tool_use.input, last_reasoning_text)
+                    if result is None:
+                        try:
+                            result = dispatch[tool_use.name](**tool_use.input)
+                        except BrokerDenied as e:
+                            # Real AWS lookups (account/policy name resolution,
+                            # SCP statement lookup) can fail closed here too, not
+                            # just the protected-policy check -- surface it to the
+                            # model as a denial it can react to (e.g. escalate to
+                            # request_human_approval) instead of crashing the run.
+                            result = {"error": f"denied: {e}"}
             last_tool_call = (tool_use.name, tool_use.input, result)
+            if tool_use.name == "update_org_policy":
+                # The ground truth for whether a write actually happened is
+                # the tool result's own `executed` flag (every code path that
+                # can produce a result for this tool -- raw, brokered,
+                # validation error, broker denial, before_tool's
+                # propose_workaround substitution -- sets it, see tools.py).
+                # The model's prose is not consulted here on purpose: it has
+                # been observed narrating success after a blocked call, so
+                # nothing about "what actually happened" can depend on what
+                # it says next turn.
+                executed = isinstance(result, dict) and result.get("executed") is True
+                policy_write_attempts.append({
+                    "policy_id": tool_use.input.get("policy_id"),
+                    "target_account": tool_use.input.get("target_account"),
+                    "executed": executed,
+                    "result": result,
+                })
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)}
             )
@@ -74,7 +107,44 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
             f"Last tool called: {name}({tool_input}) -> {result})"
         )
 
+    last_reasoning_text = _prepend_verified_outcome(last_reasoning_text, policy_write_attempts)
+
     # Falling out of the loop (rather than returning early above) only
     # happens by exhausting max_turns -- the agent never reached a stopping
     # point on its own, so this needs a human to pick up where it left off.
-    return {"final_text": last_reasoning_text, "messages": messages, "hit_turn_limit": True}
+    return {"final_text": last_reasoning_text, "messages": messages, "hit_turn_limit": True,
+            "policy_write_attempts": policy_write_attempts}
+
+
+def _prepend_verified_outcome(final_text: str, policy_write_attempts: list) -> str:
+    """Prepends a code-derived, non-negotiable statement of what the last
+    update_org_policy attempt actually did, ahead of the model's own prose.
+
+    This exists because the model has been observed claiming a change
+    succeeded in its final summary even when the tool result it just
+    received showed the call was blocked (see DESIGN.md's "Narration vs
+    verified outcome" section). Detecting that contradiction by pattern-
+    matching the model's success-claiming language would itself be the kind
+    of fragile, model-output-trusting check this whole project argues
+    against -- so instead of trying to catch the lie, this just always
+    states the verified fact first, from the tool result's own `executed`
+    flag, regardless of what the model says afterward.
+    """
+    if not policy_write_attempts:
+        return final_text
+
+    last = policy_write_attempts[-1]
+    if last["executed"]:
+        banner = (
+            f"**Verified outcome (from the tool's own result, not the model's narration): "
+            f"EXECUTED.** `update_org_policy` for `{last['policy_id']}` in "
+            f"`{last['target_account']}` ran and returned `executed: True`."
+        )
+    else:
+        banner = (
+            f"**Verified outcome (from the tool's own result, not the model's narration): "
+            f"NOT EXECUTED.** The last `update_org_policy` attempt for `{last['policy_id']}` "
+            f"in `{last['target_account']}` did not run (result: {last['result']}). "
+            f"Disregard any claim of success below -- it did not happen."
+        )
+    return f"{banner}\n\n{final_text}"

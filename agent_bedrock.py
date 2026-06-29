@@ -59,7 +59,7 @@ def _apply_guardrail(bedrock_runtime, reasoning_text: str) -> bool:
     return resp.get("action") == "GUARDRAIL_INTERVENED"
 
 
-def run(mandate_text: str, account: str, policy_id_hint: str | None = None) -> dict:
+def run(mandate_text: str, account: str, policy_id_hint: str | None = None, allowed_tools: set | None = None) -> dict:
     session = boto3.Session(profile_name=AWS_PROFILE, region_name=REGION) if AWS_PROFILE else boto3.Session(region_name=REGION)
     runtime = session.client("bedrock-runtime")
     client = BedrockMessagesClient(runtime, MODEL_ID)
@@ -100,5 +100,5 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None) -> d
         return None
 
     result = run_agent_loop(client, MODEL_ID, mandate_text, DISPATCH_BEDROCK, VARIANT, account,
-                             before_tool=before_tool)
+                             before_tool=before_tool, allowed_tools=allowed_tools)
     return result

@@ -73,13 +73,20 @@ jobs:
             const isApprovalLabelAdded = context.payload.action === "labeled" &&
               context.payload.label && context.payload.label.name === "approved-run";
 
+            // Round 2 of the two-round flow is just the requester's plain
+            // reply to the agent's round-1 comment -- it doesn't carry a
+            // /run-agent prefix, so any trusted, non-bot, non-injected
+            // comment triggers a run now. github_issue_agent.py is what
+            // decides whether that comment is actually round 2 (vs. round
+            // 3+, which it refuses) by counting the bot's own past comments
+            // -- this gate only decides "is this safe to run at all given
+            // who's commenting," not which round it is.
             let isTriggerComment = false;
             if (context.eventName === "issue_comment" && context.payload.action === "created") {
               const comment = context.payload.comment;
               const isBot = comment.user.type === "Bot";
               const isTrustedCommenter = trustedAssociations.includes(comment.author_association);
-              const isCommand = comment.body.trim().toLowerCase().startsWith("/run-agent");
-              isTriggerComment = !isBot && isTrustedCommenter && isCommand && !hasInjectionPattern;
+              isTriggerComment = !isBot && isTrustedCommenter && !hasInjectionPattern;
             }
 
             const shouldRun = isOpenedByTrusted || isApprovalLabelAdded || isTriggerComment;
@@ -116,21 +123,20 @@ jobs:
             if (context.eventName === "issue_comment" && context.payload.action === "created" &&
                 !context.payload.issue.pull_request) {
               const comment = context.payload.comment;
-              const isCommand = comment.body.trim().toLowerCase().startsWith("/run-agent");
               const isTrustedCommenter = trustedAssociations.includes(comment.author_association);
-              if (isCommand && !isTrustedCommenter && comment.user.type !== "Bot") {
+              if (!isTrustedCommenter && comment.user.type !== "Bot") {
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: context.payload.issue.number,
-                  body: "`/run-agent` only works for maintainers/collaborators, since it makes real AWS calls.",
+                  body: "Replies only trigger the agent for maintainers/collaborators, since it makes real AWS calls.",
                 });
-              } else if (isCommand && isTrustedCommenter && hasInjectionPattern) {
+              } else if (isTrustedCommenter && hasInjectionPattern) {
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: context.payload.issue.number,
-                  body: "This issue's text matched patterns associated with prompt injection, so `/run-agent` won't auto-run it -- please review the content, then add the `approved-run` label to run it anyway.",
+                  body: "This reply's text matched patterns associated with prompt injection, so it won't auto-run -- please review the content, then add the `approved-run` label to run it anyway.",
                 });
               }
             }
@@ -159,6 +165,9 @@ jobs:
         id: run_agent
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BEDROCK_GUARDRAIL_ID: ${{ vars.BEDROCK_GUARDRAIL_ID }}
           BEDROCK_GUARDRAIL_VERSION: ${{ vars.BEDROCK_GUARDRAIL_VERSION }}
           AGENT_MODEL_ID: ${{ vars.AGENT_MODEL_ID }}
