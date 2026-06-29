@@ -17,6 +17,7 @@ and recreated.
 import datetime
 import json
 import os
+import re
 import uuid
 
 import boto3
@@ -30,6 +31,16 @@ REAL_ACCOUNT_NAME = "demo-prod-core"
 INSTANCE_TYPE_SCP_NAME = "allow-only-t3-instance-types"
 TAG_SCP_NAME = "require-resource-tags"
 ACCOUNT_EXCEPTION_SID_SUFFIX = "AccountException"
+
+# Cost-allocation tags the require-resource-tags SCP actually enforces (see
+# policy_registry.py's description). The tool schema tells the model
+# new_state should be the exact tag name, but on repeat occasions (e.g.
+# issue #11) it has instead passed a descriptive sentence ("Owner tag not
+# required during..."), which fails an exact Sid match. The Sid lookup below
+# is the real enforcement boundary, not the model's phrasing, so resolve a
+# known tag name out of arbitrary text here rather than trusting the model
+# to format it.
+KNOWN_TAG_NAMES = ["Owner", "Department"]
 
 AWS_PROFILE = os.environ.get("AWS_PROFILE")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -129,6 +140,18 @@ def grant_instance_type_exception(target_account: str, instance_type: str) -> di
     return {"policy_id": policy_id, "account_id": account_id, "allowed_patterns": allowed_patterns}
 
 
+def _resolve_tag_name(raw: str) -> str:
+    """Extract a known tag name (exact Sid casing) out of free text. Returns
+    `raw` unchanged if no known tag name appears in it, so the caller's
+    not-found error still reports what was actually passed in."""
+    if raw in KNOWN_TAG_NAMES:
+        return raw
+    for tag in KNOWN_TAG_NAMES:
+        if re.search(rf"\b{re.escape(tag)}\b", raw, re.IGNORECASE):
+            return tag
+    return raw
+
+
 def grant_tag_exception(target_account: str, tag_name: str) -> dict:
     """Real AWS UpdatePolicy call. Scopes the dropped tag requirement to
     target_account only, leaving the requirement enforced for every other
@@ -139,14 +162,15 @@ def grant_tag_exception(target_account: str, tag_name: str) -> dict:
     policy_id = policy["Id"]
     content = json.loads(client.describe_policy(PolicyId=policy_id)["Policy"]["Content"])
 
-    target_sid = f"DenyRunInstancesWithout{tag_name}Tag"
+    resolved_tag = _resolve_tag_name(tag_name)
+    target_sid = f"DenyRunInstancesWithout{resolved_tag}Tag"
     statement = next((s for s in content["Statement"] if s["Sid"] == target_sid), None)
     if statement is None:
         raise BrokerDenied(f"no tag requirement statement found for tag '{tag_name}'")
 
     statement.setdefault("Condition", {}).setdefault("StringNotEquals", {})["aws:PrincipalAccount"] = account_id
     client.update_policy(PolicyId=policy_id, Content=json.dumps(content))
-    return {"policy_id": policy_id, "account_id": account_id, "exempted_tag": tag_name}
+    return {"policy_id": policy_id, "account_id": account_id, "exempted_tag": resolved_tag}
 
 
 def _assert_account_boundary(target_account: str) -> None:

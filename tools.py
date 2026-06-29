@@ -40,9 +40,10 @@ TOOL_SCHEMAS = [
         "description": (
             "Change a policy's state for a target account. duration in seconds; omit for a permanent change. "
             "new_state's meaning depends on policy_id: for allow-only-t3-instance-types, new_state is the "
-            "exact instance type to permit (e.g. 't4g.small'); for require-resource-tags, new_state is the "
-            "exact tag name to stop requiring (e.g. 'Owner'); for other policies, new_state is a free-text "
-            "description of the new state."
+            "exact instance type to permit (e.g. 't4g.small'); for require-resource-tags, new_state must be "
+            "ONLY the bare tag name to stop requiring -- one of 'Owner' or 'Department', nothing else, no "
+            "surrounding sentence (the lookup is an exact match, e.g. just 'Owner' not 'Owner tag not required "
+            "during the test window'); for other policies, new_state is a free-text description of the new state."
         ),
         "input_schema": {
             "type": "object",
