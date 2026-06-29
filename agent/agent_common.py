@@ -176,11 +176,31 @@ def _prepend_verified_outcome(final_text: str, policy_write_attempts: list) -> s
 
     last = policy_write_attempts[-1]
     if last["executed"]:
-        banner = (
-            f"**Verified outcome (from the tool's own result, not the model's narration): "
-            f"EXECUTED.** `update_org_policy` for `{last['policy_id']}` in "
-            f"`{last['target_account']}` ran and returned `executed: True`."
-        )
+        result = last["result"] if isinstance(last["result"], dict) else {}
+        if result.get("dry_run"):
+            # dry_run and executed are independent flags: dry_run means the
+            # broker still ran its full real-AWS lookup/decision logic but
+            # skipped the final write (demo-safety mode); executed means the
+            # decision itself went through, real write or not. The model has
+            # been observed treating dry_run as if it meant "not executed,"
+            # which contradicts this banner's own EXECUTED verdict one line
+            # later -- spell out the distinction here so there's nothing left
+            # for the model's prose to get backwards.
+            banner = (
+                f"**Verified outcome (from the tool's own result, not the model's narration): "
+                f"EXECUTED (dry-run simulation).** `update_org_policy` for `{last['policy_id']}` in "
+                f"`{last['target_account']}` ran and returned `executed: True` -- the broker's full "
+                f"decision logic ran for real, but BROKER_DRY_RUN is on, so no real AWS write happened "
+                f"this time. This is still a successful, deterministic decision, not a failure -- "
+                f"don't describe it below as blocked, not executed, or pending because of dry-run."
+            )
+        else:
+            banner = (
+                f"**Verified outcome (from the tool's own result, not the model's narration): "
+                f"EXECUTED.** `update_org_policy` for `{last['policy_id']}` in "
+                f"`{last['target_account']}` ran and returned `executed: True`, and (since dry-run is "
+                f"off) made a real AWS write."
+            )
     else:
         banner = (
             f"**Verified outcome (from the tool's own result, not the model's narration): "

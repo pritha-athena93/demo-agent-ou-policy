@@ -23,6 +23,21 @@ AWS_PROFILE=sandbox .venv/bin/python infra/guardrail_setup.py
 
 This writes `guardrail_config.json` (gitignored — environment-specific).
 
+## Tests
+
+```bash
+.venv/bin/pip install -q pytest
+.venv/bin/python -m pytest tests/
+```
+
+Pure-Python logic only -- no AWS creds or network calls needed. Covers
+`policy_registry.py`, `broker.py` (account boundary, duration capping,
+exception expiry), `tools.validate_tool_input`, `github_issue_agent`'s
+sanitizer/injection pre-filter, and `agent_common`'s verified-outcome banner.
+Does not cover `agent_direct.py`/`agent_bedrock.py`'s `run()` or
+`bedrock_client.py` -- those need a live or mocked Bedrock call to exercise
+meaningfully; a known gap, not faked with brittle mocks.
+
 ## Running the three scenarios locally
 
 ```bash

@@ -92,7 +92,13 @@ that result shows executed: true. If it shows a workaround, an error, or any \
 other non-executed result, say plainly that it was blocked or not applied -- \
 never say it succeeded, was applied, or is now in effect when it was not. \
 Note: a deterministic system message will also state the verified outcome \
-ahead of your summary, independent of what you write -- match it."""
+ahead of your summary, independent of what you write -- match it.
+
+update_org_policy's executed and dry_run fields are independent: executed \
+means the decision/write went through; dry_run (only present when set) \
+means it was a real-AWS-backed simulation with no actual mutation, by \
+design, not a failure. executed: true with dry_run: true is a successful \
+outcome -- never describe it as blocked, not executed, or pending."""
 
 
 def validate_tool_input(name: str, tool_input: dict) -> str | None:
