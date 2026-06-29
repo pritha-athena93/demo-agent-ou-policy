@@ -24,6 +24,7 @@ from bedrock_client import BedrockMessagesClient
 from agent_common import run_agent_loop
 from tools import DISPATCH_BEDROCK, propose_workaround
 from policy_registry import check_policy_registry
+import broker
 import logger
 
 # TEMP: open-source model, see note in agent_direct.py.
@@ -64,23 +65,39 @@ def run(mandate_text: str, account: str, policy_id_hint: str | None = None) -> d
     client = BedrockMessagesClient(runtime, MODEL_ID)
 
     def before_tool(tool_name, tool_input, last_reasoning_text):
+        if tool_name == "request_human_approval":
+            logger.log(VARIANT, account, "request_human_approval", "PENDING-APPROVAL",
+                       tool_input.get("summary", "")[:80])
+            return None
+
         if tool_name != "update_org_policy":
             return None
 
         policy_id = tool_input.get("policy_id")
-        registry_check = check_policy_registry(policy_id)
+        target_account = tool_input.get("target_account", account)
+        registry_check = check_policy_registry(policy_id, target_account)
         registry_flagged = registry_check["protected"]
 
-        if not registry_flagged:
+        if registry_flagged:
+            guardrail_flagged = _apply_guardrail(runtime, last_reasoning_text)
+            layer = "guardrail+policy-registry" if guardrail_flagged else "policy-registry"
             logger.log(VARIANT, account, f"update_org_policy({policy_id})",
-                       "ALLOWED-CHECK-PASSED", "registry clear, not a protected policy")
-            return None
+                       "BLOCKED", f"caught by {layer}")
+            return propose_workaround(f"blocked change to {policy_id}")
 
-        guardrail_flagged = _apply_guardrail(runtime, last_reasoning_text)
-        layer = "guardrail+policy-registry" if guardrail_flagged else "policy-registry"
+        # Deterministic SSM-backed allowlist gate, only relevant to the real
+        # instance-type SCP. t3.* is already permitted org-wide, so only a
+        # non-t3 request needs checking against the on-request allowlist.
+        if policy_id == broker.INSTANCE_TYPE_SCP_NAME:
+            instance_type = tool_input.get("new_state", "")
+            if not broker.is_t3_family(instance_type) and not broker.is_instance_type_overridable(instance_type):
+                logger.log(VARIANT, account, f"update_org_policy({policy_id})",
+                           "BLOCKED", "caught by ssm-allowlist, not eligible for auto-override")
+                return propose_workaround(f"blocked change to {policy_id}: {instance_type} not on the SSM allow-list")
+
         logger.log(VARIANT, account, f"update_org_policy({policy_id})",
-                   "BLOCKED", f"caught by {layer}")
-        return propose_workaround(f"blocked change to {policy_id}")
+                   "ALLOWED-CHECK-PASSED", "registry clear, not a protected policy")
+        return None
 
     result = run_agent_loop(client, MODEL_ID, mandate_text, DISPATCH_BEDROCK, VARIANT, account,
                              before_tool=before_tool)

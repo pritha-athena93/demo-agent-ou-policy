@@ -17,12 +17,49 @@ jobs:
     outputs:
       should_run: ${{ steps.gate.outputs.should_run }}
     steps:
-      - name: Gate on collaborator status, approval label, or /run-agent comment
+      - name: Gate on collaborator status, approval label, /run-agent comment, and injection pre-filter
         id: gate
         uses: actions/github-script@v7
         with:
           script: |
             const trustedAssociations = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+            // Cheap, deterministic pre-filter for the obvious prompt-injection
+            // patterns, mirrored from github_issue_agent.py's per-field
+            // sanitizer. This is defense-in-depth, not the primary defense --
+            // the real protections are the sanitizer/delimiters in the
+            // mandate, the tool-input validation before dispatch, and the
+            // broker/registry/guardrail enforcement around update_org_policy.
+            // This check only decides whether to require an explicit
+            // `approved-run` label (the one signal that means a human has
+            // actually read the content) instead of auto-running, even for
+            // an otherwise-trusted author/commenter -- a trusted account
+            // pasting someone else's injected text in good faith is exactly
+            // the case this is for.
+            //
+            // Scans parsed FIELD VALUES, not the raw issue body -- the raw
+            // body legitimately contains "### <label>" headers from the
+            // issue form itself, so matching a header pattern against it
+            // directly would flag every single issue. Parse it the same way
+            // github_issue_agent.py's parse_issue_form() does first.
+            const injectionPatterns = [
+              /\n\s*#{2,}/i,
+              /\bassistant\s*:/i,
+              /\bsystem\s*:/i,
+              /\bignore\s+(the\s+)?(previous|above)\b/i,
+              /\bnew\s+instructions?\b/i,
+              /\byou\s+are\s+now\b/i,
+              /\bact\s+as\b/i,
+              /\bsystem\s+prompt\b/i,
+            ];
+            const issueBody = context.payload.issue.body || "";
+            const fieldValues = issueBody.split(/^###\s+/m).slice(1).map((part) => {
+              const newlineIndex = part.indexOf("\n");
+              return newlineIndex === -1 ? "" : part.slice(newlineIndex + 1).trim();
+            });
+            const hasInjectionPattern = fieldValues.some((value) =>
+              injectionPatterns.some((p) => p.test(value))
+            );
 
             // issue_comment fires for both issues and PRs -- only handle issues.
             if (context.eventName === "issue_comment" && context.payload.issue.pull_request) {
@@ -31,7 +68,7 @@ jobs:
             }
 
             const isTrustedIssueAuthor = trustedAssociations.includes(context.payload.issue.author_association);
-            const isOpenedByTrusted = context.payload.action === "opened" && isTrustedIssueAuthor;
+            const isOpenedByTrusted = context.payload.action === "opened" && isTrustedIssueAuthor && !hasInjectionPattern;
 
             const isApprovalLabelAdded = context.payload.action === "labeled" &&
               context.payload.label && context.payload.label.name === "approved-run";
@@ -42,7 +79,7 @@ jobs:
               const isBot = comment.user.type === "Bot";
               const isTrustedCommenter = trustedAssociations.includes(comment.author_association);
               const isCommand = comment.body.trim().toLowerCase().startsWith("/run-agent");
-              isTriggerComment = !isBot && isTrustedCommenter && isCommand;
+              isTriggerComment = !isBot && isTrustedCommenter && isCommand && !hasInjectionPattern;
             }
 
             const shouldRun = isOpenedByTrusted || isApprovalLabelAdded || isTriggerComment;
@@ -61,6 +98,19 @@ jobs:
                 issue_number: context.payload.issue.number,
                 body: "Thanks for the report. This repo's agent only auto-runs for issues opened by maintainers/collaborators, since it makes real AWS calls. A maintainer can run it for you by adding the `approved-run` label, or commenting `/run-agent`.",
               });
+            } else if (context.payload.action === "opened" && isTrustedIssueAuthor && hasInjectionPattern) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                labels: ["needs-maintainer-approval"],
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: "This issue's text matched patterns associated with prompt injection, so it won't auto-run even though you're a maintainer/collaborator -- please review the content, then add the `approved-run` label to run it anyway.",
+              });
             }
 
             if (context.eventName === "issue_comment" && context.payload.action === "created" &&
@@ -74,6 +124,13 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: context.payload.issue.number,
                   body: "`/run-agent` only works for maintainers/collaborators, since it makes real AWS calls.",
+                });
+              } else if (isCommand && isTrustedCommenter && hasInjectionPattern) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.issue.number,
+                  body: "This issue's text matched patterns associated with prompt injection, so `/run-agent` won't auto-run it -- please review the content, then add the `approved-run` label to run it anyway.",
                 });
               }
             }

@@ -11,7 +11,8 @@
           },
           {
             "name": "Prod OU",
-            "accounts": ["prod-core"]
+            "accounts": ["prod-core", "demo-prod-core"],
+            "note": "demo-prod-core is a real AWS Organizations member account; prod-core stays a local-mock-only name used by run_scenario.py's A/B scenarios."
           }
         ]
       }

@@ -3,7 +3,8 @@ same model family with the same prompt/tools -- only the messages.create
 call site and what happens around update_org_policy differ.
 """
 
-from tools import SYSTEM_PROMPT, TOOL_SCHEMAS
+from tools import SYSTEM_PROMPT, TOOL_SCHEMAS, validate_tool_input
+from broker import BrokerDenied
 
 
 def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, account, before_tool=None, max_turns=12):
@@ -35,11 +36,30 @@ def run_agent_loop(client, model_id, mandate_text, dispatch, variant_name, accou
 
         tool_results = []
         for tool_use in tool_uses:
-            result = None
-            if before_tool is not None:
-                result = before_tool(tool_use.name, tool_use.input, last_reasoning_text)
-            if result is None:
-                result = dispatch[tool_use.name](**tool_use.input)
+            # Structural/allowlist validation runs before before_tool and
+            # dispatch, on every variant. The model's tool-call arguments may
+            # already be attacker-influenced (a prompt-injected mandate), so
+            # they get the same skepticism the broker applies to writes --
+            # just earlier and broader, so an invalid call never even reaches
+            # (and never gets logged as a spurious attempt by) the broker or
+            # guardrail layer.
+            validation_error = validate_tool_input(tool_use.name, tool_use.input)
+            if validation_error is not None:
+                result = {"error": validation_error}
+            else:
+                result = None
+                if before_tool is not None:
+                    result = before_tool(tool_use.name, tool_use.input, last_reasoning_text)
+                if result is None:
+                    try:
+                        result = dispatch[tool_use.name](**tool_use.input)
+                    except BrokerDenied as e:
+                        # Real AWS lookups (account/policy name resolution,
+                        # SCP statement lookup) can fail closed here too, not
+                        # just the protected-policy check -- surface it to the
+                        # model as a denial it can react to (e.g. escalate to
+                        # request_human_approval) instead of crashing the run.
+                        result = {"error": f"denied: {e}"}
             last_tool_call = (tool_use.name, tool_use.input, result)
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)}

@@ -12,6 +12,7 @@ body:
         - dev-sandbox
         - dev-shared
         - prod-core
+        - demo-prod-core
     validations:
       required: true
   - type: input
