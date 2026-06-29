@@ -134,8 +134,20 @@ def is_t3_family(instance_type: str) -> bool:
 
 
 def is_instance_type_overridable(instance_type: str) -> bool:
-    """Deterministic, SSM-backed -- never an LLM judgment call."""
-    return instance_type in get_allowed_instance_types_from_ssm()
+    """Deterministic, SSM-backed -- never an LLM judgment call.
+
+    Entries ending in ".*" match an entire family by prefix (e.g. "t4g.*"
+    covers t4g.nano through t4g.16xlarge, including any new size AWS adds
+    later) -- exact-list membership alone can't express "all of a family"
+    without enumerating every current size and going stale when AWS adds
+    more."""
+    for entry in get_allowed_instance_types_from_ssm():
+        if entry.endswith(".*"):
+            if instance_type.startswith(entry[:-1]):
+                return True
+        elif instance_type == entry:
+            return True
+    return False
 
 
 _INSTANCE_TYPE_PATTERN = re.compile(r"\b[a-z][0-9]+[a-z]*\.[0-9]*[a-z]+\b", re.IGNORECASE)
