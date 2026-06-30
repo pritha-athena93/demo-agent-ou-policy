@@ -64,15 +64,15 @@ aws iam put-role-policy --profile sandbox \
 aws iam get-role --profile sandbox --role-name github-agent-ou-policy-demo --query 'Role.Arn' --output text
 ```
 
-Note: the broker and `update_org_policy` are local-mock Python for
-`dev-sandbox`/`dev-shared`/`prod-core` -- no real AWS API calls for those
-three accounts. `demo-prod-core` is a real AWS Organizations member account,
-and the broker does real `organizations:UpdatePolicy` calls against its
-SCPs (see `agent/broker.py`, and the Design section below). The CI role
-therefore needs Organizations + SSM access too, not just Bedrock -- add this
-second inline policy (note the explicit `Deny` on touching the protected
-`no-public-ip-ec2` SCP by ID, the real IAM-level backstop matching the
-broker's own protected-policy check):
+Note: the broker can do real `organizations:UpdatePolicy` calls against
+real SCPs in a real AWS Organizations member account (see `agent/broker.py`,
+and the Design section below) -- not every target account in
+`policy_registry.py` has to be wired to a real one; unwired accounts stay
+local-mock with no real AWS API calls. The CI role therefore needs
+Organizations + SSM access too, not just Bedrock -- add this second inline
+policy (note the explicit `Deny` on touching the protected `no-public-ip-ec2`
+SCP by ID, the real IAM-level backstop matching the broker's own
+protected-policy check):
 
 ```bash
 cat > /tmp/github-agent-org-permissions.json <<'EOF'
@@ -119,7 +119,7 @@ aws organizations tag-resource --profile sandbox \
   --tags Key=Protected,Value=true
 ```
 
-If you later wire the local-mock accounts' broker path to real per-account
+If you later wire more local-mock accounts' broker path to real per-account
 AssumeRole grants too, give those roles their own narrow trust policy rather
 than widening this one.
 
@@ -131,8 +131,8 @@ gh variable set AWS_REGION --body "us-east-1"
 gh variable set BEDROCK_GUARDRAIL_ID --body "$(jq -r .guardrail_id guardrail_config.json)"
 gh variable set BEDROCK_GUARDRAIL_VERSION --body "$(jq -r .guardrail_version guardrail_config.json)"
 gh variable set AGENT_MODEL_ID --body "qwen.qwen3-coder-next"
-# Set to "1" before a live demo to exercise the real-AWS broker path against
-# demo-prod-core without it mutating live SCP JSON.
+# Set to "1" before a live demo to exercise the real-AWS broker path without
+# it mutating live SCP JSON.
 gh variable set BROKER_DRY_RUN --body "1"
 ```
 
@@ -165,18 +165,18 @@ demo proves enforcement lives outside the model, not inside a prompt.
 
 | File | Role |
 |---|---|
-| `org_model.json` | Local mock org tree: Root → Platform OU → Dev OU (`dev-sandbox`, `dev-shared`) + Prod OU (`prod-core`, `demo-prod-core`), plus an `agent-ops` tooling account outside the tree. |
 | `agent/policy_registry.py` | Deterministic `check_policy_registry(policy_id, target_account)`. Seeded with protected/unprotected policies, fails closed (unknown IDs treated as protected). |
 | `agent/tools.py` | Shared `SYSTEM_PROMPT`, `TOOL_SCHEMAS`, and the 4 tool implementations (`check_policy_registry`, `propose_workaround`, `update_org_policy`, `request_human_approval`). Two `update_org_policy` variants: `_raw` (direct, no check) and `_brokered` (routes through `broker.py`). Also owns `validate_tool_input` -- structural/allowlist validation of the model's tool-call arguments, run before any business logic. |
-| `agent/broker.py` | JIT access broker -- the real enforcement boundary. Checks the registry/SSM allow-list before issuing any credential or making a real AWS write; account-boundary assertion as a hard backstop independent of broker logic correctness. For `demo-prod-core`, does real `organizations:UpdatePolicy` calls against actual SCPs, scoped per-account via `aws:PrincipalAccount` conditions. |
+| `agent/broker.py` | JIT access broker -- the real enforcement boundary. Checks the registry/SSM allow-list before issuing any credential or making a real AWS write; account-boundary assertion as a hard backstop independent of broker logic correctness. Where wired to a real AWS Organizations account, does real `organizations:UpdatePolicy` calls against actual SCPs, scoped per-account via `aws:PrincipalAccount` conditions. |
 | `agent/agent_common.py` | The shared tool-calling loop both variants drive. The LLM decides which tool to call and in what order -- nothing here hardcodes a sequence. Also force-corrects known facts (e.g. `target_account`, `new_state`) the model has been observed mangling, and prepends a deterministic verified-outcome banner ahead of the model's own narration. |
 | `agent/bedrock_client.py` | Adapter using the Bedrock Converse API, so the loop works against any model provider with no code changes. |
 | `agent/agent_direct.py` | **model-direct** variant -- same model, no guardrail attached, no intermediate check before `update_org_policy` executes. This is the gap the demo illustrates. |
 | `agent/agent_bedrock.py` | **Bedrock+Guardrails** variant. Before `update_org_policy` runs: deterministic registry check first; only if that says protected, also calls `ApplyGuardrail` on the agent's last reasoning text as a second layer. Either flag → block, return `propose_workaround` output instead, log which layer caught it. |
-| `infra/guardrail_setup.py` | One-time setup: creates/updates the Bedrock Guardrail (denied topic + word filters tied to `no-public-ip-ec2`) in the AWS account. Idempotent. |
 | `agent/logger.py` | One-line-per-step plain-text trace, not JSON. |
-| `scenarios/run_scenario.py` | Local entry point for the three scripted scenarios (A/B/C) used to demo the gap directly, without GitHub. |
+| `infra/guardrail_setup.py` | One-time setup: creates/updates the Bedrock Guardrail (denied topic + word filters tied to `no-public-ip-ec2`) in the AWS account. Idempotent. |
 | `github_integration/github_issue_agent.py` | GitHub-issue entry point: parses an issue form, drives a two-round flow (round 1: assessment + proposed workaround only, no write tools reachable; round 2: the requester's reply must end in either a real policy update or a human-in-the-loop escalation), and writes back a comment with the outcome. |
+| `conftest.py` | Puts `agent/` and `github_integration/` on `sys.path` so tests can import their modules by bare name, same as the entry-point scripts do. |
+| `tests/` | Pure-Python unit tests -- no AWS creds or network calls needed. |
 
 ### The two agent variants
 
@@ -189,15 +189,15 @@ the shared system prompt says.
 prompt, same tools. Before `update_org_policy` executes:
 1. `check_policy_registry(policy_id, target_account)` runs first,
    unconditionally -- the deterministic check.
-2. For `demo-prod-core` specifically, the real SCP's own AWS tag
+2. For an account wired to a real SCP, the real SCP's own AWS tag
    (`Protected`) is checked too, independent of the local registry, so the
    two sources of truth can't silently drift.
 3. If protected by either: `ApplyGuardrail` also runs on the agent's last
    reasoning text as an additional layer, then the call is blocked
    regardless of the guardrail's verdict. Logs `BLOCKED` plus which
    layer(s) caught it.
-4. If not protected: the brokered write runs (real AWS write for
-   `demo-prod-core`, local-mock grant otherwise).
+4. If not protected: the brokered write runs (a real AWS write where wired
+   to a real account, a local-mock grant otherwise).
 
 The system prompt is intentionally neutral -- it does not instruct the
 agent to route prod/permanent changes through human approval. The only
@@ -211,9 +211,9 @@ variants.
 - Runs the registry/SSM-allow-list check first. Denied → no credential
   issued, no AWS write made.
 - Allowed → issues a scoped grant (local-mock accounts) or makes a real,
-  account-scoped `organizations:UpdatePolicy` call (`demo-prod-core`).
-  Duration is capped at `MAX_DURATION_SECONDS` regardless of what was
-  requested.
+  account-scoped `organizations:UpdatePolicy` call (accounts wired to a real
+  AWS Organizations member account). Duration is capped at
+  `MAX_DURATION_SECONDS` regardless of what was requested.
 - `_assert_account_boundary` hard-fails on any account outside the known
   set -- models the IAM role's trust-policy condition, the backstop that
   holds even if the broker's own logic above it has a bug.
