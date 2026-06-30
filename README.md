@@ -3,86 +3,14 @@
 Two tool-calling agents, identical tools/prompt/mandate, both calling the
 same model via Amazon Bedrock -- one with Bedrock Guardrails attached, one
 without. Same task, only the platform wrapper (guardrail or not) differs.
-The model itself defaults to an open-source stand-in (see "Using a different
-model" below) until this AWS account's Anthropic use-case form is approved;
-swap to a real Claude model with one env var, no code changes. See
-`DESIGN.md` for the architecture and why each piece exists.
-
-## Setup
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -q boto3 anthropic python-dotenv
-
-# Configure an AWS profile with Bedrock access in your target account/region,
-# e.g. `aws configure --profile sandbox`.
-
-# Create the Bedrock Guardrail (idempotent, safe to re-run after editing config):
-AWS_PROFILE=sandbox .venv/bin/python infra/guardrail_setup.py
-```
-
-This writes `guardrail_config.json` (gitignored — environment-specific).
-
-## Tests
-
-```bash
-.venv/bin/pip install -q pytest
-.venv/bin/python -m pytest tests/
-```
-
-Pure-Python logic only -- no AWS creds or network calls needed. Covers
-`policy_registry.py`, `broker.py` (account boundary, duration capping,
-exception expiry), `tools.validate_tool_input`, `github_issue_agent`'s
-sanitizer/injection pre-filter, and `agent_common`'s verified-outcome banner.
-Does not cover `agent_direct.py`/`agent_bedrock.py`'s `run()` or
-`bedrock_client.py` -- those need a live or mocked Bedrock call to exercise
-meaningfully; a known gap, not faked with brittle mocks.
-
-## Running the three scenarios locally
-
-```bash
-rm -f scenario_trace.log   # optional, keeps the trace clean for a fresh run
-AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py A   # model-direct, protected policy -> succeeds (the risk)
-AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py B   # bedrock+guardrails, same request -> blocked
-AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py C   # bedrock+guardrails, unprotected policy -> temporary scoped override
-cat scenario_trace.log
-```
-
-Each run prints a trace line:
-`<timestamp> | <variant> | <account> | <action> | <outcome> | <why>`
-
-Because a real LLM decides which tools to call, exact behavior can vary
-between takes (especially scenario A/B — the model may choose the cautious
-workaround instead of attempting the policy change). Re-run if a scenario
-doesn't land on the outcome you want to show; this variance is expected, not
-a bug — see `DESIGN.md`'s reliability notes.
-
-`demo_recordings/` has one saved clean transcript per scenario (A/B/C) as a
-fallback if a live take doesn't land where you want it to during a
-presentation -- re-generate these (same commands, redirect output to the
-file) within 24h of any live demo, since model/infra behavior can drift.
-
-Set `AGENT_TEMPERATURE` (e.g. `0.2`) to reduce phrasing/path variance across
-takes without scripting the outcome outright -- lower values make the model
-more likely to repeat its previous choice given a similar prompt, not
-guaranteed to. Unset by default (normal sampling).
-
-### Using a different model
-
-Both agents read `AGENT_MODEL_ID` from the environment (falls back to the
-open-source `qwen.qwen3-coder-next` stand-in):
-```bash
-AGENT_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0" AWS_PROFILE=sandbox .venv/bin/python scenarios/run_scenario.py A
-```
-Requires the account's Anthropic-model use-case form to be approved in the
-Bedrock console (Model access page) — Bedrock blocks Anthropic models
-without it. No other code changes needed.
+The model defaults to an open-source stand-in (set `AGENT_MODEL_ID` to use a
+different Bedrock model).
 
 ## GitHub integration
 
 Lets people raise an issue describing what's blocked and where; an agent
 (Bedrock+Guardrails variant only) runs automatically for trusted issue
-openers and comments back the outcome. Full rationale in `DESIGN.md`.
+openers and comments back the outcome.
 
 ### One-time AWS setup (OIDC, no stored keys)
 
@@ -140,11 +68,11 @@ Note: the broker and `update_org_policy` are local-mock Python for
 `dev-sandbox`/`dev-shared`/`prod-core` -- no real AWS API calls for those
 three accounts. `demo-prod-core` is a real AWS Organizations member account,
 and the broker does real `organizations:UpdatePolicy` calls against its
-SCPs (see `agent/broker.py`, `DESIGN.md`'s "JIT access broker" section). The
-CI role therefore needs Organizations + SSM access too, not just Bedrock --
-add this second inline policy (note the explicit `Deny` on touching the
-protected `no-public-ip-ec2` SCP by ID, the real IAM-level backstop matching
-the broker's own protected-policy check):
+SCPs (see `agent/broker.py`, and the Design section below). The CI role
+therefore needs Organizations + SSM access too, not just Bedrock -- add this
+second inline policy (note the explicit `Deny` on touching the protected
+`no-public-ip-ec2` SCP by ID, the real IAM-level backstop matching the
+broker's own protected-policy check):
 
 ```bash
 cat > /tmp/github-agent-org-permissions.json <<'EOF'
@@ -204,7 +132,7 @@ gh variable set BEDROCK_GUARDRAIL_ID --body "$(jq -r .guardrail_id guardrail_con
 gh variable set BEDROCK_GUARDRAIL_VERSION --body "$(jq -r .guardrail_version guardrail_config.json)"
 gh variable set AGENT_MODEL_ID --body "qwen.qwen3-coder-next"
 # Set to "1" before a live demo to exercise the real-AWS broker path against
-# demo-prod-core without it mutating live SCP JSON -- see DESIGN.md.
+# demo-prod-core without it mutating live SCP JSON.
 gh variable set BROKER_DRY_RUN --body "1"
 ```
 
@@ -224,38 +152,94 @@ gh variable set BROKER_DRY_RUN --body "1"
    non-collaborators or bots are ignored.
 5. Check the Actions tab for the run, and the issue comments for the result.
 
-### Testing the issue handler without GitHub
+## Design
 
-```bash
-AWS_PROFILE=sandbox ISSUE_BODY='### Account
+### Thesis
 
-dev-sandbox
+Config files and prompts are not enforcement. Only infra-level controls
+(IAM, policy-as-code) are. Two agents, identical tools, identical system
+prompt, identical mandate text -- only the platform wrapper differs. The
+demo proves enforcement lives outside the model, not inside a prompt.
 
-### Policy ID (if known)
+### Code structure
 
-max-ebs-volume-size-dev
+| File | Role |
+|---|---|
+| `org_model.json` | Local mock org tree: Root → Platform OU → Dev OU (`dev-sandbox`, `dev-shared`) + Prod OU (`prod-core`, `demo-prod-core`), plus an `agent-ops` tooling account outside the tree. |
+| `agent/policy_registry.py` | Deterministic `check_policy_registry(policy_id, target_account)`. Seeded with protected/unprotected policies, fails closed (unknown IDs treated as protected). |
+| `agent/tools.py` | Shared `SYSTEM_PROMPT`, `TOOL_SCHEMAS`, and the 4 tool implementations (`check_policy_registry`, `propose_workaround`, `update_org_policy`, `request_human_approval`). Two `update_org_policy` variants: `_raw` (direct, no check) and `_brokered` (routes through `broker.py`). Also owns `validate_tool_input` -- structural/allowlist validation of the model's tool-call arguments, run before any business logic. |
+| `agent/broker.py` | JIT access broker -- the real enforcement boundary. Checks the registry/SSM allow-list before issuing any credential or making a real AWS write; account-boundary assertion as a hard backstop independent of broker logic correctness. For `demo-prod-core`, does real `organizations:UpdatePolicy` calls against actual SCPs, scoped per-account via `aws:PrincipalAccount` conditions. |
+| `agent/agent_common.py` | The shared tool-calling loop both variants drive. The LLM decides which tool to call and in what order -- nothing here hardcodes a sequence. Also force-corrects known facts (e.g. `target_account`, `new_state`) the model has been observed mangling, and prepends a deterministic verified-outcome banner ahead of the model's own narration. |
+| `agent/bedrock_client.py` | Adapter using the Bedrock Converse API, so the loop works against any model provider with no code changes. |
+| `agent/agent_direct.py` | **model-direct** variant -- same model, no guardrail attached, no intermediate check before `update_org_policy` executes. This is the gap the demo illustrates. |
+| `agent/agent_bedrock.py` | **Bedrock+Guardrails** variant. Before `update_org_policy` runs: deterministic registry check first; only if that says protected, also calls `ApplyGuardrail` on the agent's last reasoning text as a second layer. Either flag → block, return `propose_workaround` output instead, log which layer caught it. |
+| `infra/guardrail_setup.py` | One-time setup: creates/updates the Bedrock Guardrail (denied topic + word filters tied to `no-public-ip-ec2`) in the AWS account. Idempotent. |
+| `agent/logger.py` | One-line-per-step plain-text trace, not JSON. |
+| `scenarios/run_scenario.py` | Local entry point for the three scripted scenarios (A/B/C) used to demo the gap directly, without GitHub. |
+| `github_integration/github_issue_agent.py` | GitHub-issue entry point: parses an issue form, drives a two-round flow (round 1: assessment + proposed workaround only, no write tools reachable; round 2: the requester's reply must end in either a real policy update or a human-in-the-loop escalation), and writes back a comment with the outcome. |
 
-### What is blocked?
+### The two agent variants
 
-Cant resize EBS volume past 500GB
+**model-direct** (`agent/agent_direct.py`) -- `update_org_policy` executes
+immediately when the model calls it. No broker, no guardrail, no registry
+check at the tool layer. Nothing infra-level stops it, regardless of what
+the shared system prompt says.
 
-### What are you trying to do?
+**Bedrock+Guardrails** (`agent/agent_bedrock.py`) -- same model, same
+prompt, same tools. Before `update_org_policy` executes:
+1. `check_policy_registry(policy_id, target_account)` runs first,
+   unconditionally -- the deterministic check.
+2. For `demo-prod-core` specifically, the real SCP's own AWS tag
+   (`Protected`) is checked too, independent of the local registry, so the
+   two sources of truth can't silently drift.
+3. If protected by either: `ApplyGuardrail` also runs on the agent's last
+   reasoning text as an additional layer, then the call is blocked
+   regardless of the guardrail's verdict. Logs `BLOCKED` plus which
+   layer(s) caught it.
+4. If not protected: the brokered write runs (real AWS write for
+   `demo-prod-core`, local-mock grant otherwise).
 
-Need a bigger volume for this sprint dev workload' .venv/bin/python github_integration/github_issue_agent.py
-cat issue_comment.md
-```
+The system prompt is intentionally neutral -- it does not instruct the
+agent to route prod/permanent changes through human approval. The only
+thing that actually blocks unsafe actions is the broker/registry/guardrail
+code path in the Bedrock variant, never prompt text shared by both
+variants.
 
-## Troubleshooting
+### JIT access broker
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Scenario A doesn't call `update_org_policy` | Model played it safe instead of "fixing forward" — free-text reasoning varies by take | Re-run |
-| Scenario B doesn't show `BLOCKED` (no `update_org_policy` call at all) | Model went straight to the workaround in text without calling the tool | Re-run |
-| Scenario C unexpectedly shows `BLOCKED` | Should not happen — `agent_bedrock.py` only calls `ApplyGuardrail` when the registry already says protected, and `max-ebs-volume-size-dev` never does. If you see this, the registry or gating logic regressed | File a bug, don't just re-run |
-| `ResourceNotFoundException: ... use case details` | Anthropic use-case form not yet approved for this AWS account on Bedrock | Use the open-source stand-in model (default), or wait for approval |
-| `ValidationException: ... on-demand throughput isn't supported` | Used a bare model ID instead of an inference profile ID | Use a `us.anthropic.*`-prefixed profile ID, not bare `anthropic.*` |
+`agent/broker.py` sits in front of every brokered `update_org_policy` call:
+- Runs the registry/SSM-allow-list check first. Denied → no credential
+  issued, no AWS write made.
+- Allowed → issues a scoped grant (local-mock accounts) or makes a real,
+  account-scoped `organizations:UpdatePolicy` call (`demo-prod-core`).
+  Duration is capped at `MAX_DURATION_SECONDS` regardless of what was
+  requested.
+- `_assert_account_boundary` hard-fails on any account outside the known
+  set -- models the IAM role's trust-policy condition, the backstop that
+  holds even if the broker's own logic above it has a bug.
+- `BROKER_DRY_RUN=1` runs the full real-AWS lookup/decide/diff logic
+  without the final write -- for exercising the real account safely (e.g.
+  before a live demo).
 
-## Files
+### The deterministic-vs-LLM boundary
 
-See `DESIGN.md` for the architecture table and rationale. Every code file
-has a companion `<name>_doc.md` with what it does, how, and how to use it.
+The model decides *which tool to call and when*; it never decides *whether
+an action is allowed*. Every point where the model's literal output would
+otherwise be trusted as fact -- which account it's targeting, which exact
+tag or instance type to grant, whether a write actually executed -- is
+instead pinned to a value the code already knows or extracts deterministically
+from the original request text, and the model's copy is overridden if it
+disagrees. This is the same principle applied repeatedly throughout the
+codebase, not a one-off fix: the prompt doesn't enforce anything; the code
+does.
+
+### Two-round GitHub issue flow
+
+Round 1 is assessment-only -- the model can read the registry and propose a
+workaround, but the tool-calling loop's `allowed_tools` gate makes
+`update_org_policy`/`request_human_approval` unreachable no matter what the
+model decides. Round 2 (the requester's reply) must end in a terminal
+outcome: either a real policy update attempt or a human-in-the-loop
+escalation, with a deterministic fallback that auto-escalates if the model
+just talks without calling either tool. Round counting is done by scanning
+the bot's own past comments for a marker string, not a label or state file.
